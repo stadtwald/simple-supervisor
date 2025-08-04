@@ -231,6 +231,8 @@ void teardown() {
         return;
     }
 
+    printf("[SYSTEM] Asking all processes to exit.\n");
+
     teardown_in_progress = 1;
 
     for(int i = 0; i < CHILDREN_COUNT; i += 1) {
@@ -267,7 +269,7 @@ void reap(pid_t pid) {
             children[i].stderr = -1;
             children[i].stdout = -1;
 
-            printf("[SYSTEM] Process for %s (%lli) has died.\n", children[i].config->name, (long long int)pid);
+            printf("[SYSTEM] Process for %s (%lli) has exited.\n", children[i].config->name, (long long int)pid);
 
             break;
         }
@@ -413,6 +415,8 @@ void event_loop() {
         if(sigusr1_received) {
             sigusr1_received = 0;
 
+            printf("[SYSTEM] Received SIGUSR1.\n");
+
             for(int i = 0; i < CHILDREN_COUNT; i += 1) {
                 if(!children[i].running) {
                     continue;
@@ -426,6 +430,8 @@ void event_loop() {
 
         if(sigusr2_received) {
             sigusr2_received = 0;
+
+            printf("[SYSTEM] Received SIGUSR2.\n");
 
             for(int i = 0; i < CHILDREN_COUNT; i += 1) {
                 if(!children[i].running) {
@@ -469,7 +475,7 @@ void event_loop() {
             }
 
             if(!some_child_running) {
-                printf("[SYSTEM] All child processes have terminated.\n");
+                printf("[SYSTEM] All child processes have exited.\n");
                 exit(1);
             }
         }
@@ -482,7 +488,10 @@ int main(int argc, char **argv) {
     int children_spawned = setup_children();
 
     if(children_spawned != CHILDREN_COUNT) {
+        printf("[SYSTEM] Not all children could be spawned.\n");
         teardown();
+    } else {
+        printf("[SYSTEM] All processes have been spawned.\n");
     }
 
     event_loop();
