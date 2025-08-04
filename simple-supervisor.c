@@ -91,8 +91,8 @@ struct buffer {
 struct child_state {
     struct buffer out_buffer;
     struct buffer err_buffer;
-    int stdout;
-    int stderr;
+    int f_out;
+    int f_err;
     pid_t pid;
     int running;
     const struct child_configuration *config;
@@ -176,8 +176,8 @@ int setup_children(int phase) {
             break;
         }
 
-        children[i].stderr = p_err[0];
-        children[i].stdout = p_out[0];
+        children[i].f_err = p_err[0];
+        children[i].f_out = p_out[0];
         close(p_in[1]);
 
         pid_t pid = fork();
@@ -187,8 +187,8 @@ int setup_children(int phase) {
             rv = -1;
             break;
         } else if(pid == 0) {
-            close(children[i].stderr);
-            close(children[i].stdout);
+            close(children[i].f_err);
+            close(children[i].f_out);
 
             execute(config, p_in[0], p_out[1], p_err[1]);
         } else {
@@ -293,11 +293,11 @@ void reap(pid_t pid, int exit_status) {
             children[i].pid = -1;
             children[i].running = 0;
 
-            close(children[i].stderr);
-            close(children[i].stdout);
+            close(children[i].f_err);
+            close(children[i].f_out);
 
-            children[i].stderr = -1;
-            children[i].stdout = -1;
+            children[i].f_err = -1;
+            children[i].f_out = -1;
 
             if(children[i].config->is_startup_check) {
                 if(exit_status == 0) {
@@ -471,8 +471,8 @@ void setup_poll(struct poll_data *data) {
             continue;
         }
 
-        if(child->stdout != -1) {
-            data->entry[data->count].fd = child->stdout;
+        if(child->f_out != -1) {
+            data->entry[data->count].fd = child->f_out;
             data->entry[data->count].events = POLLIN;
             data->entry[data->count].revents = 0;
             data->child[data->count] = child;
@@ -480,8 +480,8 @@ void setup_poll(struct poll_data *data) {
             data->count += 1;
         }
 
-        if(child->stderr != -1) {
-            data->entry[data->count].fd = child->stderr;
+        if(child->f_err != -1) {
+            data->entry[data->count].fd = child->f_err;
             data->entry[data->count].events = POLLIN;
             data->entry[data->count].revents = 0;
             data->child[data->count] = child;
@@ -511,11 +511,11 @@ void handle_io(struct poll_data *data) {
             close(data->entry[j].fd);
 
             if(data->flavour[j] == FLAVOUR_STDOUT) {
-                child->stdout = -1;
+                child->f_out = -1;
             }
 
             if(data->flavour[j] == FLAVOUR_STDERR) {
-                child->stderr = -1;
+                child->f_err = -1;
             }
         }
     } 
