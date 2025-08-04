@@ -322,83 +322,7 @@ int pump_buffer(struct buffer *buffer, int output_fd, int input_fd, const char *
     return 1;
 }
 
-#define FLAVOUR_SIGNAL (-1)
-#define FLAVOUR_STDOUT (1)
-#define FLAVOUR_STDERR (2)
-
-void event_loop() {
-    nfds_t fd_count = 0;
-    struct pollfd fd[CHILDREN_COUNT * 2 + 1];
-    struct child_state *fd_child[CHILDREN_COUNT * 2 + 1];
-    int fd_flavour[CHILDREN_COUNT * 2 + 1];
-
-    fd[fd_count].fd = signal_r;
-    fd[fd_count].events = POLLIN;
-    fd[fd_count].revents = 0;
-    fd_child[fd_count] = NULL;
-    fd_flavour[fd_count] = FLAVOUR_SIGNAL;        
-    fd_count += 1;
-
-    for(int i = 0; i < CHILDREN_COUNT; i += 1) {
-        if(!children[i].running) {
-            continue;
-        }
-
-        if(children[i].stdout != -1) {
-            fd[fd_count].fd = children[i].stdout;
-            fd[fd_count].events = POLLIN;
-            fd[fd_count].revents = 0;
-            fd_child[fd_count] = &children[i];
-            fd_flavour[fd_count] = FLAVOUR_STDOUT;
-            fd_count += 1;
-        }
-
-        if(children[i].stderr != -1) {
-            fd[fd_count].fd = children[i].stderr;
-            fd[fd_count].events = POLLIN;
-            fd[fd_count].revents = 0;
-            fd_child[fd_count] = &children[i];
-            fd_flavour[fd_count] = FLAVOUR_STDERR;
-            fd_count += 1;
-        }
-    }
-
-    int status = poll(&fd[0], fd_count, -1);
-
-    if(status == -1 && errno != EINTR) {
-        warn("poll()");
-    }
-
-    if(status > 0) {
-        for(int j = 0; j < fd_count; j += 1) {
-            if((fd[j].revents & POLLIN) != POLLIN) {
-                continue;
-            }
-
-            if(fd_flavour[j] == FLAVOUR_SIGNAL) {
-                char dummy[1000];
-                read(signal_r, &dummy[0], 1000);
-                continue;
-            }
-
-            struct child_state *child = fd_child[j];
-            struct buffer *buffer = (fd_flavour[j] == FLAVOUR_STDOUT) ? &child->out_buffer : &child->err_buffer;
-            int output_fd = (fd_flavour[j] == FLAVOUR_STDOUT) ? STDOUT_FILENO : STDERR_FILENO;
-
-            if(pump_buffer(buffer, output_fd, fd[j].fd, child->config->name) < 1) {
-                close(fd[j].fd);
-
-                if(fd_flavour[j] == FLAVOUR_STDOUT) {
-                    child->stdout = -1;
-                }
-
-                if(fd_flavour[j] == FLAVOUR_STDERR) {
-                    child->stderr = -1;
-                }
-            }
-        }
-    }
-
+void check_signals() {
     if(termination_signal_received) {
         termination_signal_received = 0;
         printf("[SYSTEM] Received request to terminate.\n");
@@ -449,7 +373,9 @@ void event_loop() {
 
         brutal_teardown();
     }
+}
 
+void check_for_terminations() {
     while(1) {
         pid_t pid = waitpid(-1, NULL, WNOHANG);
 
@@ -461,22 +387,120 @@ void event_loop() {
 
         teardown();
     }
+}
 
-    {
-        int some_child_running = 0;
+void check_completed() {
+    int some_child_running = 0;
 
-        for(int i = 0; i < CHILDREN_COUNT; i += 1) {
-            if(children[i].running) {
-                some_child_running = 1;
-                break;
-            }
-        }
-
-        if(!some_child_running) {
-            printf("[SYSTEM] All child processes have exited.\n");
-            exit(1);
+    for(int i = 0; i < CHILDREN_COUNT; i += 1) {
+        if(children[i].running) {
+            some_child_running = 1;
+            break;
         }
     }
+
+    if(!some_child_running) {
+        printf("[SYSTEM] All child processes have exited.\n");
+        exit(1);
+    }
+}
+
+#define FLAVOUR_SIGNAL (-1)
+#define FLAVOUR_STDOUT (1)
+#define FLAVOUR_STDERR (2)
+
+struct poll_data {
+    nfds_t count;
+    struct pollfd entry[CHILDREN_COUNT * 2 + 1];
+    struct child_state *child[CHILDREN_COUNT * 2 + 1];
+    int flavour[CHILDREN_COUNT * 2 + 1];
+};
+
+void setup_poll(struct poll_data *data) {
+    data->count = 0;
+
+    data->entry[data->count].fd = signal_r;
+    data->entry[data->count].events = POLLIN;
+    data->entry[data->count].revents = 0;
+    data->child[data->count] = NULL;
+    data->flavour[data->count] = FLAVOUR_SIGNAL;        
+    data->count += 1;
+
+    for(int i = 0; i < CHILDREN_COUNT; i += 1) {
+        struct child_state *child = &children[i];
+
+        if(!child->running) {
+            continue;
+        }
+
+        if(child->stdout != -1) {
+            data->entry[data->count].fd = child->stdout;
+            data->entry[data->count].events = POLLIN;
+            data->entry[data->count].revents = 0;
+            data->child[data->count] = child;
+            data->flavour[data->count] = FLAVOUR_STDOUT;
+            data->count += 1;
+        }
+
+        if(child->stderr != -1) {
+            data->entry[data->count].fd = child->stderr;
+            data->entry[data->count].events = POLLIN;
+            data->entry[data->count].revents = 0;
+            data->child[data->count] = child;
+            data->flavour[data->count] = FLAVOUR_STDERR;
+            data->count += 1;
+        }
+    }
+}
+
+void handle_io(struct poll_data *data) {
+    for(int j = 0; j < data->count; j += 1) {
+        if((data->entry[j].revents & POLLIN) != POLLIN) {
+            continue;
+        }
+
+        if(data->flavour[j] == FLAVOUR_SIGNAL) {
+            char dummy[1000];
+            read(signal_r, &dummy[0], 1000);
+            continue;
+        }
+
+        struct child_state *child = data->child[j];
+        struct buffer *buffer = (data->flavour[j] == FLAVOUR_STDOUT) ? &child->out_buffer : &child->err_buffer;
+        int output_fd = (data->flavour[j] == FLAVOUR_STDOUT) ? STDOUT_FILENO : STDERR_FILENO;
+
+        if(pump_buffer(buffer, output_fd, data->entry[j].fd, child->config->name) < 1) {
+            close(data->entry[j].fd);
+
+            if(data->flavour[j] == FLAVOUR_STDOUT) {
+                child->stdout = -1;
+            }
+
+            if(data->flavour[j] == FLAVOUR_STDERR) {
+                child->stderr = -1;
+            }
+        }
+    } 
+}
+
+void pump() {
+    struct poll_data data;
+
+    setup_poll(&data);
+
+    int status = poll(&data.entry[0], data.count, -1);
+
+    if(status == -1 && errno != EINTR) {
+        warn("poll()");
+    }
+
+    if(status > 0) {
+        handle_io(&data);
+    }
+
+    check_signals();
+    check_for_terminations();
+    check_completed();
 }
 
 int main(int argc, char **argv) {
@@ -492,9 +516,10 @@ int main(int argc, char **argv) {
     }
 
     while(1) {
-        event_loop();
+        pump();
     }
 
+    // should never get here
     return 1;
 }
 
