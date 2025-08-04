@@ -38,27 +38,48 @@ struct child_configuration {
     int receives_sigusr1;
     int receives_sigusr2;
     int termination_signal;
+    int is_startup_check;
 };
+
+#define PHASE_CHECK 0
+#define PHASE_NORMAL 1
 
 /*** BEGIN CONFIGURATION ***/
 
+// this length includes a terminating line feed
 #define MAX_LINE_LENGTH 120
 
-// this length includes a terminating line feed
-const char *startup_check_command[] = { NULL };
-unsigned int shutdown_timeout = 10; // in seconds
+// in seconds
+#define SHUTDOWN_TIMEOUT 10
 
-#define CHILDREN_COUNT 1
+#define CHILDREN_COUNT 3
+
 const struct child_configuration child_configuration[CHILDREN_COUNT] = {
     {
         .command = { "/bin/sh", "-c", "while true; do sleep 5; echo 'hello'; done", NULL },
         .name = "SLEEPER",
         .receives_sigusr1 = 0,
         .receives_sigusr2 = 0,
-        .termination_signal = SIGTERM
+        .termination_signal = SIGTERM,
+        .is_startup_check = 0
+    },
+    {
+        .command = { "/usr/bin/echo", "check done!", NULL },
+        .name = "CHECK",
+        .receives_sigusr1 = 0,
+        .receives_sigusr2 = 0,
+        .termination_signal = SIGTERM,
+        .is_startup_check = 1
+    },
+    {
+        .command = { "/usr/bin/sh", "-c", "echo doing check...; sleep 6", NULL },
+        .name = "CHECK2",
+        .receives_sigusr1 = 0,
+        .receives_sigusr2 = 0,
+        .termination_signal = SIGTERM,
+        .is_startup_check = 1
     }
 };
-
 
 /*** END CONFIGURATION ***/
 
@@ -121,14 +142,22 @@ void execute(const struct child_configuration *configuration, int p_in, int p_ou
     err(1, "execve()");
 }
 
-int setup_children() {
-    int children_setup = 0;
+int setup_children(int phase) {
+    int rv = 0;
 
     for(int i = 0; i < CHILDREN_COUNT; i += 1) {
         const struct child_configuration *config = &child_configuration[i];
         int p_err[2];
         int p_in[2];
         int p_out[2];
+
+        if(phase == PHASE_CHECK && !config->is_startup_check) {
+            continue;
+        }
+
+        if(phase == PHASE_NORMAL && config->is_startup_check) {
+            continue;
+        }
 
         children[i].config = config;
 
@@ -155,6 +184,7 @@ int setup_children() {
 
         if(pid == -1) {
             warn("fork()");
+            rv = -1;
             break;
         } else if(pid == 0) {
             close(children[i].stderr);
@@ -168,11 +198,11 @@ int setup_children() {
 
             children[i].pid = pid;
             children[i].running = 1;
-            children_setup += 1;
+            rv += 1;
         }
     }
 
-    return children_setup;
+    return rv;
 }
 
 void setup_signal_handler() {
@@ -243,7 +273,7 @@ void teardown() {
         kill(children[i].pid, children[i].config->termination_signal);
     }
 
-    alarm(shutdown_timeout);
+    alarm(SHUTDOWN_TIMEOUT);
 }
 
 __attribute__((noreturn))
@@ -257,7 +287,7 @@ void brutal_teardown() {
     exit(1);
 }
 
-void reap(pid_t pid) {
+void reap(pid_t pid, int exit_status) {
     for(int i = 0; i < CHILDREN_COUNT; i += 1) {
         if(children[i].pid == pid && children[i].running) {
             children[i].pid = -1;
@@ -269,7 +299,15 @@ void reap(pid_t pid) {
             children[i].stderr = -1;
             children[i].stdout = -1;
 
-            printf("[SYSTEM] Process for %s (%lli) has exited.\n", children[i].config->name, (long long int)pid);
+            if(children[i].config->is_startup_check) {
+                if(exit_status == 0) {
+                    printf("[SYSTEM] Process for %s (%lli) has indicated success.\n", children[i].config->name, (long long int)pid);
+                } else {
+                    printf("[SYSTEM] Process for %s (%lli) has indicated failure.\n", children[i].config->name, (long long int)pid);
+                }
+            } else {
+                printf("[SYSTEM] Process for %s (%lli) has exited.\n", children[i].config->name, (long long int)pid);
+            }
 
             break;
         }
@@ -375,21 +413,24 @@ void check_signals() {
     }
 }
 
-void check_for_terminations() {
+void check_for_terminations(int phase) {
     while(1) {
-        pid_t pid = waitpid(-1, NULL, WNOHANG);
+        int status;
+        pid_t pid = waitpid(-1, &status, WNOHANG);
 
         if(pid < 1) {
             break;
         }
 
-        reap(pid);
+        reap(pid, status);
 
-        teardown();
+        if(WEXITSTATUS(status) != 0 || phase != PHASE_CHECK) {
+            teardown();
+        }
     }
 }
 
-void check_completed() {
+int check_pending() {
     int some_child_running = 0;
 
     for(int i = 0; i < CHILDREN_COUNT; i += 1) {
@@ -399,10 +440,7 @@ void check_completed() {
         }
     }
 
-    if(!some_child_running) {
-        printf("[SYSTEM] All child processes have exited.\n");
-        exit(1);
-    }
+    return some_child_running;
 }
 
 #define FLAVOUR_SIGNAL (-1)
@@ -483,7 +521,7 @@ void handle_io(struct poll_data *data) {
     } 
 }
 
-void pump() {
+int pump(int phase) {
     struct poll_data data;
 
     setup_poll(&data);
@@ -499,27 +537,49 @@ void pump() {
     }
 
     check_signals();
-    check_for_terminations();
-    check_completed();
+    check_for_terminations(phase);
+
+    return check_pending();
+}
+
+void startup_check() {
+    int result = setup_children(PHASE_CHECK);
+
+    if(result == -1) {
+        printf("[SYSTEM] Not all check commands could be spawned.\n");
+        teardown();
+    } else if(result == 0) {
+        return;
+    }
+
+    while(pump(PHASE_CHECK)) {}
+
+    if(!teardown_in_progress) {
+        printf("[SYSTEM] All startup checks have passed.\n");
+    }
 }
 
 int main(int argc, char **argv) {
     setup_signal_handler();
 
-    int children_spawned = setup_children();
+    startup_check();
 
-    if(children_spawned != CHILDREN_COUNT) {
+    if(teardown_in_progress) {
+        printf("[SYSTEM] Startup check failed, shutting down.\n");
+        return 1;
+    }
+
+    if(setup_children(PHASE_NORMAL) == -1) {
         printf("[SYSTEM] Not all children could be spawned.\n");
         teardown();
     } else {
         printf("[SYSTEM] All processes have been spawned.\n");
     }
 
-    while(1) {
-        pump();
-    }
+    while(pump(PHASE_NORMAL)) {};
 
-    // should never get here
+    printf("[SYSTEM] All child processes have exited.\n");
+
     return 1;
 }
 
