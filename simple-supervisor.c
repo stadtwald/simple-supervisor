@@ -327,157 +327,154 @@ int pump_buffer(struct buffer *buffer, int output_fd, int input_fd, const char *
 #define FLAVOUR_STDERR (2)
 
 void event_loop() {
-    while(1) {
-        nfds_t fd_count = 0;
-        struct pollfd fd[CHILDREN_COUNT * 2 + 1];
-        struct child_state *fd_child[CHILDREN_COUNT * 2 + 1];
-        int fd_flavour[CHILDREN_COUNT * 2 + 1];
+    nfds_t fd_count = 0;
+    struct pollfd fd[CHILDREN_COUNT * 2 + 1];
+    struct child_state *fd_child[CHILDREN_COUNT * 2 + 1];
+    int fd_flavour[CHILDREN_COUNT * 2 + 1];
 
-        fd[fd_count].fd = signal_r;
-        fd[fd_count].events = POLLIN;
-        fd[fd_count].revents = 0;
-        fd_child[fd_count] = NULL;
-        fd_flavour[fd_count] = FLAVOUR_SIGNAL;
-        
-        fd_count += 1;
+    fd[fd_count].fd = signal_r;
+    fd[fd_count].events = POLLIN;
+    fd[fd_count].revents = 0;
+    fd_child[fd_count] = NULL;
+    fd_flavour[fd_count] = FLAVOUR_SIGNAL;        
+    fd_count += 1;
+
+    for(int i = 0; i < CHILDREN_COUNT; i += 1) {
+        if(!children[i].running) {
+            continue;
+        }
+
+        if(children[i].stdout != -1) {
+            fd[fd_count].fd = children[i].stdout;
+            fd[fd_count].events = POLLIN;
+            fd[fd_count].revents = 0;
+            fd_child[fd_count] = &children[i];
+            fd_flavour[fd_count] = FLAVOUR_STDOUT;
+            fd_count += 1;
+        }
+
+        if(children[i].stderr != -1) {
+            fd[fd_count].fd = children[i].stderr;
+            fd[fd_count].events = POLLIN;
+            fd[fd_count].revents = 0;
+            fd_child[fd_count] = &children[i];
+            fd_flavour[fd_count] = FLAVOUR_STDERR;
+            fd_count += 1;
+        }
+    }
+
+    int status = poll(&fd[0], fd_count, -1);
+
+    if(status == -1 && errno != EINTR) {
+        warn("poll()");
+    }
+
+    if(status > 0) {
+        for(int j = 0; j < fd_count; j += 1) {
+            if((fd[j].revents & POLLIN) != POLLIN) {
+                continue;
+            }
+
+            if(fd_flavour[j] == FLAVOUR_SIGNAL) {
+                char dummy[1000];
+                read(signal_r, &dummy[0], 1000);
+                continue;
+            }
+
+            struct child_state *child = fd_child[j];
+            struct buffer *buffer = (fd_flavour[j] == FLAVOUR_STDOUT) ? &child->out_buffer : &child->err_buffer;
+            int output_fd = (fd_flavour[j] == FLAVOUR_STDOUT) ? STDOUT_FILENO : STDERR_FILENO;
+
+            if(pump_buffer(buffer, output_fd, fd[j].fd, child->config->name) < 1) {
+                close(fd[j].fd);
+
+                if(fd_flavour[j] == FLAVOUR_STDOUT) {
+                    child->stdout = -1;
+                }
+
+                if(fd_flavour[j] == FLAVOUR_STDERR) {
+                    child->stderr = -1;
+                }
+            }
+        }
+    }
+
+    if(termination_signal_received) {
+        termination_signal_received = 0;
+        printf("[SYSTEM] Received request to terminate.\n");
+        if(teardown_in_progress) {
+            printf("[SYSTEM] Shutdown already in progress, so performing hard shutdown.\n");
+            brutal_teardown();
+        }
+        printf("[SYSTEM] Performing soft shutdown.\n");
+        teardown();
+    }
+
+    if(sigusr1_received) {
+        sigusr1_received = 0;
+
+        printf("[SYSTEM] Received SIGUSR1.\n");
 
         for(int i = 0; i < CHILDREN_COUNT; i += 1) {
             if(!children[i].running) {
                 continue;
             }
-
-            if(children[i].stdout != -1) {
-                fd[fd_count].fd = children[i].stdout;
-                fd[fd_count].events = POLLIN;
-                fd[fd_count].revents = 0;
-                fd_child[fd_count] = &children[i];
-                fd_flavour[fd_count] = FLAVOUR_STDOUT;
-                fd_count += 1;
-            }
-
-            if(children[i].stderr != -1) {
-                fd[fd_count].fd = children[i].stderr;
-                fd[fd_count].events = POLLIN;
-                fd[fd_count].revents = 0;
-                fd_child[fd_count] = &children[i];
-                fd_flavour[fd_count] = FLAVOUR_STDERR;
-                fd_count += 1;
+            if(children[i].config->receives_sigusr1) {
+                printf("[SYSTEM] Passing SIGUSR1 to child %s (%lli).\n", children[i].config->name, (long long int)children[i].pid);
+                kill(children[i].pid, SIGUSR1);
             }
         }
+    }
 
-        int status = poll(&fd[0], fd_count, -1);
+    if(sigusr2_received) {
+        sigusr2_received = 0;
 
-        if(status == -1 && errno != EINTR) {
-            warn("poll()");
-        }
+        printf("[SYSTEM] Received SIGUSR2.\n");
 
-        if(status > 0) {
-            for(int j = 0; j < fd_count; j += 1) {
-                if((fd[j].revents & POLLIN) != POLLIN) {
-                    continue;
-                }
-
-                if(fd_flavour[j] == FLAVOUR_SIGNAL) {
-                    char dummy[1000];
-                    read(signal_r, &dummy[0], 1000);
-                    continue;
-                }
-
-                struct child_state *child = fd_child[j];
-                struct buffer *buffer = (fd_flavour[j] == FLAVOUR_STDOUT) ? &child->out_buffer : &child->err_buffer;
-                int output_fd = (fd_flavour[j] == FLAVOUR_STDOUT) ? STDOUT_FILENO : STDERR_FILENO;
-
-                if(pump_buffer(buffer, output_fd, fd[j].fd, child->config->name) < 1) {
-                    close(fd[j].fd);
-
-                    if(fd_flavour[j] == FLAVOUR_STDOUT) {
-                        child->stdout = -1;
-                    }
-
-                    if(fd_flavour[j] == FLAVOUR_STDERR) {
-                        child->stderr = -1;
-                    }
-                }
+        for(int i = 0; i < CHILDREN_COUNT; i += 1) {
+            if(!children[i].running) {
+                continue;
+            }
+            if(children[i].config->receives_sigusr2) {
+                printf("[SYSTEM] Passing SIGUSR2 to child %s (%lli).\n", children[i].config->name, (long long int)children[i].pid);
+                kill(children[i].pid, SIGUSR2);
             }
         }
+    }
 
-        if(termination_signal_received) {
-            termination_signal_received = 0;
-            printf("[SYSTEM] Received request to terminate.\n");
-            if(teardown_in_progress) {
-                printf("[SYSTEM] Shutdown already in progress, so performing hard shutdown.\n");
-                brutal_teardown();
-            }
-            printf("[SYSTEM] Performing soft shutdown.\n");
-            teardown();
+    if(sigalrm_received) {
+        sigalrm_received = 0;
+
+        printf("[SYSTEM] Shutdown timeout has arrived, performing hard shutdown.\n");
+
+        brutal_teardown();
+    }
+
+    while(1) {
+        pid_t pid = waitpid(-1, NULL, WNOHANG);
+
+        if(pid < 1) {
+            break;
         }
 
-        if(sigusr1_received) {
-            sigusr1_received = 0;
+        reap(pid);
 
-            printf("[SYSTEM] Received SIGUSR1.\n");
+        teardown();
+    }
 
-            for(int i = 0; i < CHILDREN_COUNT; i += 1) {
-                if(!children[i].running) {
-                    continue;
-                }
-                if(children[i].config->receives_sigusr1) {
-                    printf("[SYSTEM] Passing SIGUSR1 to child %s (%lli).\n", children[i].config->name, (long long int)children[i].pid);
-                    kill(children[i].pid, SIGUSR1);
-                }
-            }
-        }
+    {
+        int some_child_running = 0;
 
-        if(sigusr2_received) {
-            sigusr2_received = 0;
-
-            printf("[SYSTEM] Received SIGUSR2.\n");
-
-            for(int i = 0; i < CHILDREN_COUNT; i += 1) {
-                if(!children[i].running) {
-                    continue;
-                }
-                if(children[i].config->receives_sigusr2) {
-                    printf("[SYSTEM] Passing SIGUSR2 to child %s (%lli).\n", children[i].config->name, (long long int)children[i].pid);
-                    kill(children[i].pid, SIGUSR2);
-                }
-            }
-        }
-
-        if(sigalrm_received) {
-            sigalrm_received = 0;
-
-            printf("[SYSTEM] Shutdown timeout has arrived, performing hard shutdown.\n");
-
-            brutal_teardown();
-        }
-
-        while(1) {
-            pid_t pid = waitpid(-1, NULL, WNOHANG);
-
-            if(pid < 1) {
+        for(int i = 0; i < CHILDREN_COUNT; i += 1) {
+            if(children[i].running) {
+                some_child_running = 1;
                 break;
             }
-
-            reap(pid);
-
-            teardown();
         }
 
-        {
-            int some_child_running = 0;
-
-            for(int i = 0; i < CHILDREN_COUNT; i += 1) {
-                if(children[i].running) {
-                    some_child_running = 1;
-                    break;
-                }
-            }
-
-            if(!some_child_running) {
-                printf("[SYSTEM] All child processes have exited.\n");
-                exit(1);
-            }
+        if(!some_child_running) {
+            printf("[SYSTEM] All child processes have exited.\n");
+            exit(1);
         }
     }
 }
@@ -494,7 +491,9 @@ int main(int argc, char **argv) {
         printf("[SYSTEM] All processes have been spawned.\n");
     }
 
-    event_loop();
+    while(1) {
+        event_loop();
+    }
 
     return 1;
 }
