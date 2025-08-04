@@ -560,7 +560,6 @@ void startup_check() {
 }
 
 int main(int argc, char **argv) {
-
 #ifdef __OpenBSD__
     if(unveil("/", "x") == -1) {
         err(1, "unveil()");
@@ -570,6 +569,10 @@ int main(int argc, char **argv) {
         err(1, "pledge()");
     }
 #endif
+
+    if(argc > 1) {
+        errx(1, "no command line arguments accepted");
+    }
 
     setup_signal_handler();
 
