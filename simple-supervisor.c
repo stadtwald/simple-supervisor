@@ -62,15 +62,22 @@ const struct child_configuration child_configuration[CHILDREN_COUNT] = {
 
 /*** END CONFIGURATION ***/
 
-char err_buffer[CHILDREN_COUNT][MAX_LINE_LENGTH + 1];
-size_t err_buffer_position[CHILDREN_COUNT];
-char out_buffer[CHILDREN_COUNT][MAX_LINE_LENGTH + 1];
-size_t out_buffer_position[CHILDREN_COUNT];
-int child_stdin[CHILDREN_COUNT];
-int child_stdout[CHILDREN_COUNT];
-int child_stderr[CHILDREN_COUNT];
-pid_t child_pid[CHILDREN_COUNT];
-int child_running[CHILDREN_COUNT];
+struct buffer {
+    char buffer[MAX_LINE_LENGTH + 1];
+    size_t position;
+};
+
+struct child_state {
+    struct buffer out_buffer;
+    struct buffer err_buffer;
+    int stdout;
+    int stderr;
+    pid_t pid;
+    int running;
+    const struct child_configuration *config;
+};
+
+struct child_state children[CHILDREN_COUNT];
 
 int signal_r;
 int signal_w;
@@ -118,9 +125,12 @@ int setup_children() {
     int children_setup = 0;
 
     for(int i = 0; i < CHILDREN_COUNT; i += 1) {
+        const struct child_configuration *config = &child_configuration[i];
         int p_err[2];
         int p_in[2];
         int p_out[2];
+
+        children[i].config = config;
 
         if(pipe(&p_err[0]) == -1) {
             warn("pipe()");
@@ -137,8 +147,8 @@ int setup_children() {
             break;
         }
 
-        child_stderr[i] = p_err[0];
-        child_stdout[i] = p_out[0];
+        children[i].stderr = p_err[0];
+        children[i].stdout = p_out[0];
         close(p_in[1]);
 
         pid_t pid = fork();
@@ -147,17 +157,17 @@ int setup_children() {
             warn("fork()");
             break;
         } else if(pid == 0) {
-            close(child_stderr[i]);
-            close(child_stdout[i]);
+            close(children[i].stderr);
+            close(children[i].stdout);
 
-            execute(&child_configuration[i], p_in[0], p_out[1], p_err[1]);
+            execute(config, p_in[0], p_out[1], p_err[1]);
         } else {
             close(p_in[0]);
             close(p_out[1]);
             close(p_err[1]);
 
-            child_pid[i] = pid;
-            child_running[i] = 1;
+            children[i].pid = pid;
+            children[i].running = 1;
             children_setup += 1;
         }
     }
@@ -224,11 +234,11 @@ void teardown() {
     teardown_in_progress = 1;
 
     for(int i = 0; i < CHILDREN_COUNT; i += 1) {
-        if(!child_running[i]) {
+        if(!children[i].running) {
             continue;
         }
 
-        kill(child_pid[i], child_configuration[i].termination_signal);
+        kill(children[i].pid, children[i].config->termination_signal);
     }
 
     alarm(shutdown_timeout);
@@ -237,8 +247,8 @@ void teardown() {
 __attribute__((noreturn))
 void brutal_teardown() {
     for(int i = 0; i < CHILDREN_COUNT; i += 1) {
-        if(child_running[i]) {
-            kill(child_pid[i], SIGKILL);
+        if(children[i].running) {
+            kill(children[i].pid, SIGKILL);
         }
     }
 
@@ -247,25 +257,31 @@ void brutal_teardown() {
 
 void reap(pid_t pid) {
     for(int i = 0; i < CHILDREN_COUNT; i += 1) {
-        if(child_pid[i] == pid && child_running[i]) {
-            child_pid[i] = -1;
-            child_running[i] = 0;
+        if(children[i].pid == pid && children[i].running) {
+            children[i].pid = -1;
+            children[i].running = 0;
 
-            close(child_stderr[i]);
-            close(child_stdout[i]);
+            close(children[i].stderr);
+            close(children[i].stdout);
 
-            child_stderr[i] = -1;
-            child_stdout[i] = -1;
+            children[i].stderr = -1;
+            children[i].stdout = -1;
 
-            printf("[SYSTEM] Process for %s (%lli) has died.\n", child_configuration[i].name, (long long int)pid);
+            printf("[SYSTEM] Process for %s (%lli) has died.\n", children[i].config->name, (long long int)pid);
 
             break;
         }
     }
 }
 
-int pump_buffer(char *buffer, size_t *p_position, int output_fd, int input_fd, const char *child_name) {
-    size_t buffer_space_left = MAX_LINE_LENGTH - *p_position;
+void flush_buffer(struct buffer *buffer, int output_fd, const char *child_name) {
+    *(&buffer->buffer[0] + buffer->position) = 0;
+    dprintf(output_fd, "[%s] %s\n", child_name, &buffer->buffer[0]);
+    buffer->position = 0;
+}
+
+int pump_buffer(struct buffer *buffer, int output_fd, int input_fd, const char *child_name) {
+    size_t buffer_space_left = MAX_LINE_LENGTH - buffer->position;
     char tmp_buffer[MAX_LINE_LENGTH];
     ssize_t bytes_read = read(input_fd, &tmp_buffer[0], buffer_space_left);
 
@@ -274,37 +290,31 @@ int pump_buffer(char *buffer, size_t *p_position, int output_fd, int input_fd, c
     }
 
     if(bytes_read == 0) {
-        *(buffer + *p_position) = 0;
-        dprintf(output_fd, "[%s] %s\n", child_name, buffer);
-        *p_position = 0;
+        flush_buffer(buffer, output_fd, child_name);
         return 0;
     }
 
     char *inp = &tmp_buffer[0];
-    char *outp = buffer + *p_position;
+    char *outp = &buffer->buffer[0] + buffer->position;
 
     for(int bytes_processed = 0; bytes_processed < bytes_read; bytes_processed += 1, inp += 1) {
         if(*inp == '\r') {
         } else if(*inp == '\n') {
-            *outp = 0;
-            dprintf(output_fd, "[%s] %s\n", child_name, buffer);
-            *p_position = 0;
-            outp = &buffer[0];
+            flush_buffer(buffer, output_fd, child_name);
+            outp = &buffer->buffer[0];
         } else if(*inp < ' ' || *inp == 127) {
             *outp = ' ';
             outp += 1;
-            *p_position += 1;
+            buffer->position += 1;
         } else {
             *outp = *inp;
             outp += 1;
-            *p_position += 1;
+            buffer->position += 1;
         }
     }
 
     if(buffer_space_left == 0) {
-        *(buffer + *p_position) = 0;
-        dprintf(output_fd, "[%s] %s\n", child_name, buffer);
-        *p_position = 0;
+        flush_buffer(buffer, output_fd, child_name);
     }
 
     return 1;
@@ -318,36 +328,36 @@ void event_loop() {
     while(1) {
         nfds_t fd_count = 0;
         struct pollfd fd[CHILDREN_COUNT * 2 + 1];
-        int fd_child[CHILDREN_COUNT * 2 + 1];
+        struct child_state *fd_child[CHILDREN_COUNT * 2 + 1];
         int fd_flavour[CHILDREN_COUNT * 2 + 1];
 
         fd[fd_count].fd = signal_r;
         fd[fd_count].events = POLLIN;
         fd[fd_count].revents = 0;
-        fd_child[fd_count] = -1;
+        fd_child[fd_count] = NULL;
         fd_flavour[fd_count] = FLAVOUR_SIGNAL;
         
         fd_count += 1;
 
         for(int i = 0; i < CHILDREN_COUNT; i += 1) {
-            if(!child_running[i]) {
+            if(!children[i].running) {
                 continue;
             }
 
-            if(child_stdout[i] != -1) {
-                fd[fd_count].fd = child_stdout[i];
+            if(children[i].stdout != -1) {
+                fd[fd_count].fd = children[i].stdout;
                 fd[fd_count].events = POLLIN;
                 fd[fd_count].revents = 0;
-                fd_child[fd_count] = i;
+                fd_child[fd_count] = &children[i];
                 fd_flavour[fd_count] = FLAVOUR_STDOUT;
                 fd_count += 1;
             }
 
-            if(child_stderr[i] != -1) {
-                fd[fd_count].fd = child_stderr[i];
+            if(children[i].stderr != -1) {
+                fd[fd_count].fd = children[i].stderr;
                 fd[fd_count].events = POLLIN;
                 fd[fd_count].revents = 0;
-                fd_child[fd_count] = i;
+                fd_child[fd_count] = &children[i];
                 fd_flavour[fd_count] = FLAVOUR_STDERR;
                 fd_count += 1;
             }
@@ -371,20 +381,19 @@ void event_loop() {
                     continue;
                 }
 
-                int child_i = fd_child[j];
-                char *buffer = (fd_flavour[j] == FLAVOUR_STDOUT) ? &out_buffer[child_i][0] : &err_buffer[child_i][0];
-                size_t *p_position = (fd_flavour[j] == FLAVOUR_STDOUT) ? &out_buffer_position[child_i] : &err_buffer_position[child_i];
+                struct child_state *child = fd_child[j];
+                struct buffer *buffer = (fd_flavour[j] == FLAVOUR_STDOUT) ? &child->out_buffer : &child->err_buffer;
                 int output_fd = (fd_flavour[j] == FLAVOUR_STDOUT) ? STDOUT_FILENO : STDERR_FILENO;
 
-                if(pump_buffer(buffer, p_position, output_fd, fd[j].fd, child_configuration[child_i].name) < 1) {
+                if(pump_buffer(buffer, output_fd, fd[j].fd, child->config->name) < 1) {
                     close(fd[j].fd);
 
                     if(fd_flavour[j] == FLAVOUR_STDOUT) {
-                        child_stdout[child_i] = -1;
+                        child->stdout = -1;
                     }
 
                     if(fd_flavour[j] == FLAVOUR_STDERR) {
-                        child_stderr[child_i] = -1;
+                        child->stderr = -1;
                     }
                 }
             }
@@ -405,12 +414,12 @@ void event_loop() {
             sigusr1_received = 0;
 
             for(int i = 0; i < CHILDREN_COUNT; i += 1) {
-                if(!child_running[i]) {
+                if(!children[i].running) {
                     continue;
                 }
-                if(child_configuration[i].receives_sigusr1) {
-                    printf("[SYSTEM] Passing SIGUSR1 to child %s (%lli).\n", child_configuration[i].name, (long long int)child_pid[i]);
-                    kill(child_pid[i], SIGUSR1);
+                if(children[i].config->receives_sigusr1) {
+                    printf("[SYSTEM] Passing SIGUSR1 to child %s (%lli).\n", children[i].config->name, (long long int)children[i].pid);
+                    kill(children[i].pid, SIGUSR1);
                 }
             }
         }
@@ -419,12 +428,12 @@ void event_loop() {
             sigusr2_received = 0;
 
             for(int i = 0; i < CHILDREN_COUNT; i += 1) {
-                if(!child_running[i]) {
+                if(!children[i].running) {
                     continue;
                 }
-                if(child_configuration[i].receives_sigusr2) {
-                    printf("[SYSTEM] Passing SIGUSR2 to child %s (%lli).\n", child_configuration[i].name, (long long int)child_pid[i]);
-                    kill(child_pid[i], SIGUSR2);
+                if(children[i].config->receives_sigusr2) {
+                    printf("[SYSTEM] Passing SIGUSR2 to child %s (%lli).\n", children[i].config->name, (long long int)children[i].pid);
+                    kill(children[i].pid, SIGUSR2);
                 }
             }
         }
@@ -453,7 +462,7 @@ void event_loop() {
             int some_child_running = 0;
 
             for(int i = 0; i < CHILDREN_COUNT; i += 1) {
-                if(child_running[i]) {
+                if(children[i].running) {
                     some_child_running = 1;
                     break;
                 }
