@@ -560,6 +560,17 @@ void startup_check() {
 }
 
 int main(int argc, char **argv) {
+
+#ifdef __OpenBSD__
+    if(unveil("/", "x") == -1) {
+        err(1, "unveil()");
+    }
+
+    if(pledge("stdio proc exec", NULL) == -1) {
+        err(1, "pledge()");
+    }
+#endif
+
     setup_signal_handler();
 
     startup_check();
@@ -575,6 +586,12 @@ int main(int argc, char **argv) {
     } else {
         printf("[SYSTEM] All processes have been spawned.\n");
     }
+
+#ifdef __OpenBSD__
+    if(pledge("stdio proc", NULL) == -1) {
+        err(1, "pledge()");
+    }
+#endif
 
     while(pump(PHASE_NORMAL)) {};
 
