@@ -46,7 +46,6 @@ struct child_configuration {
 
 // this length includes a terminating line feed
 const char *startup_check_command[] = { NULL };
-const char *health_check_command[] = { NULL };
 unsigned int shutdown_timeout = 10; // in seconds
 
 #define CHILDREN_COUNT 1
