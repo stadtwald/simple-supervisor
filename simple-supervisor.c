@@ -534,9 +534,14 @@ void startup_check() {
 }
 
 void normal_phase() {
-    if(setup_children(PHASE_NORMAL) == -1) {
+    int result = setup_children(PHASE_NORMAL);
+
+    if(result == -1) {
         printf("[SYSTEM] Not all children could be spawned.\n");
         teardown();
+    } else if(result == 0) {
+        printf("[SYSTEM] No children specified in configuration, exiting.\n");
+        return;
     } else {
         printf("[SYSTEM] All processes have been spawned.\n");
     }
