@@ -25,10 +25,6 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#if __CHAR_BIT__ != 8
-#error "we only support 8-bit bytes"
-#endif
-
 // this can safely be adjusted upwards if necessary
 #define MAX_CHILD_COMMAND_ARGUMENT_COUNT 20
 
