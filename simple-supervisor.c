@@ -143,6 +143,18 @@ int setup_children(int phase) {
         children[i].f_out = p_out[0];
         close(p_in[1]);
 
+        if(fcntl(p_err[0], F_SETFD, FD_CLOEXEC) == -1) {
+            warn("fcntl(..., F_SETFD, FD_CLOEXEC)");
+            rv = -1;
+            break;
+        }
+
+        if(fcntl(p_out[0], F_SETFD, FD_CLOEXEC) == -1) {
+            warn("fcntl(..., F_SETFD, FD_CLOEXEC)");
+            rv = -1;
+            break;
+        }
+
         pid_t pid = fork();
 
         if(pid == -1) {
@@ -150,9 +162,6 @@ int setup_children(int phase) {
             rv = -1;
             break;
         } else if(pid == 0) {
-            close(children[i].f_err);
-            close(children[i].f_out);
-
             execute(config, p_in[0], p_out[1], p_err[1]);
         } else {
             close(p_in[0]);
