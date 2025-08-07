@@ -533,6 +533,25 @@ void startup_check() {
     }
 }
 
+void normal_phase() {
+    if(setup_children(PHASE_NORMAL) == -1) {
+        printf("[SYSTEM] Not all children could be spawned.\n");
+        teardown();
+    } else {
+        printf("[SYSTEM] All processes have been spawned.\n");
+    }
+
+#ifdef __OpenBSD__
+    if(pledge("stdio proc", NULL) == -1) {
+        err(1, "pledge()");
+    }
+#endif
+
+    while(pump(PHASE_NORMAL)) {};
+
+    printf("[SYSTEM] All child processes have exited.\n");
+}
+
 int main(int argc, char **argv) {
 #ifdef __OpenBSD__
     if(unveil("/", "x") == -1) {
@@ -557,22 +576,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    if(setup_children(PHASE_NORMAL) == -1) {
-        printf("[SYSTEM] Not all children could be spawned.\n");
-        teardown();
-    } else {
-        printf("[SYSTEM] All processes have been spawned.\n");
-    }
-
-#ifdef __OpenBSD__
-    if(pledge("stdio proc", NULL) == -1) {
-        err(1, "pledge()");
-    }
-#endif
-
-    while(pump(PHASE_NORMAL)) {};
-
-    printf("[SYSTEM] All child processes have exited.\n");
+    normal_phase();
 
     return 1;
 }
