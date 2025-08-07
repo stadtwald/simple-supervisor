@@ -88,6 +88,12 @@ void signal_handler(int signum) {
 
 __attribute__((noreturn))
 void execute(const struct child_configuration *configuration, int p_in, int p_out, int p_err) {
+#ifdef __OpenBSD__
+    if(pledge("stdio exec", NULL) == -1) {
+        err(1, "pledge()");
+    }
+#endif
+
     if(dup2(p_in, STDIN_FILENO) == -1) {
         err(1, "dup2() for stdin");
     }
