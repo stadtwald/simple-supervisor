@@ -45,13 +45,13 @@ struct child_configuration {
 struct buffer {
     char buffer[MAX_LINE_LENGTH + 1];
     size_t position;
+    int destination_fd;
+    int source_fd;
 };
 
 struct child_state {
     struct buffer out_buffer;
     struct buffer err_buffer;
-    int f_out;
-    int f_err;
     pid_t pid;
     int running;
     const struct child_configuration *config;
@@ -141,8 +141,10 @@ int setup_children(int phase) {
             break;
         }
 
-        children[i].f_err = p_err[0];
-        children[i].f_out = p_out[0];
+        children[i].err_buffer.source_fd = p_err[0];
+        children[i].err_buffer.destination_fd = STDERR_FILENO;
+        children[i].out_buffer.source_fd = p_out[0];
+        children[i].out_buffer.destination_fd = STDOUT_FILENO;
         close(p_in[1]);
 
         if(fcntl(p_err[0], F_SETFD, FD_CLOEXEC) == -1) {
@@ -267,11 +269,11 @@ void reap(pid_t pid, int exit_status) {
             children[i].pid = -1;
             children[i].running = 0;
 
-            close(children[i].f_err);
-            close(children[i].f_out);
+            close(children[i].err_buffer.source_fd);
+            close(children[i].out_buffer.source_fd);
 
-            children[i].f_err = -1;
-            children[i].f_out = -1;
+            children[i].err_buffer.source_fd = -1;
+            children[i].out_buffer.source_fd = -1;
 
             if(children[i].config->is_startup_check) {
                 if(exit_status == 0) {
@@ -288,23 +290,23 @@ void reap(pid_t pid, int exit_status) {
     }
 }
 
-void flush_buffer(struct buffer *buffer, int output_fd, const char *child_name) {
+void flush_buffer(struct buffer *buffer, const char *child_name) {
     *(&buffer->buffer[0] + buffer->position) = 0;
-    dprintf(output_fd, "[%s] %s\n", child_name, &buffer->buffer[0]);
+    dprintf(buffer->destination_fd, "[%s] %s\n", child_name, &buffer->buffer[0]);
     buffer->position = 0;
 }
 
-int pump_buffer(struct buffer *buffer, int output_fd, int input_fd, const char *child_name) {
+int pump_buffer(struct buffer *buffer, const char *child_name) {
     size_t buffer_space_left = MAX_LINE_LENGTH - buffer->position;
     char tmp_buffer[MAX_LINE_LENGTH];
-    ssize_t bytes_read = read(input_fd, &tmp_buffer[0], buffer_space_left);
+    ssize_t bytes_read = read(buffer->source_fd, &tmp_buffer[0], buffer_space_left);
 
     if(bytes_read == -1) {
         return -1;
     }
 
     if(bytes_read == 0) {
-        flush_buffer(buffer, output_fd, child_name);
+        flush_buffer(buffer, child_name);
         return 0;
     }
 
@@ -314,7 +316,7 @@ int pump_buffer(struct buffer *buffer, int output_fd, int input_fd, const char *
     for(int bytes_processed = 0; bytes_processed < bytes_read; bytes_processed += 1, inp += 1) {
         if(*inp == '\r') {
         } else if(*inp == '\n') {
-            flush_buffer(buffer, output_fd, child_name);
+            flush_buffer(buffer, child_name);
             outp = &buffer->buffer[0];
         } else if(*inp < ' ' || *inp == 127) {
             *outp = ' ';
@@ -328,7 +330,7 @@ int pump_buffer(struct buffer *buffer, int output_fd, int input_fd, const char *
     }
 
     if(buffer_space_left == 0) {
-        flush_buffer(buffer, output_fd, child_name);
+        flush_buffer(buffer, child_name);
     }
 
     return 1;
@@ -445,8 +447,8 @@ void setup_poll(struct poll_data *data) {
             continue;
         }
 
-        if(child->f_out != -1) {
-            data->entry[data->count].fd = child->f_out;
+        if(child->out_buffer.source_fd != -1) {
+            data->entry[data->count].fd = child->out_buffer.source_fd;
             data->entry[data->count].events = POLLIN;
             data->entry[data->count].revents = 0;
             data->child[data->count] = child;
@@ -454,8 +456,8 @@ void setup_poll(struct poll_data *data) {
             data->count += 1;
         }
 
-        if(child->f_err != -1) {
-            data->entry[data->count].fd = child->f_err;
+        if(child->err_buffer.source_fd != -1) {
+            data->entry[data->count].fd = child->err_buffer.source_fd;
             data->entry[data->count].events = POLLIN;
             data->entry[data->count].revents = 0;
             data->child[data->count] = child;
@@ -479,17 +481,16 @@ void handle_io(struct poll_data *data) {
 
         struct child_state *child = data->child[j];
         struct buffer *buffer = (data->flavour[j] == FLAVOUR_STDOUT) ? &child->out_buffer : &child->err_buffer;
-        int output_fd = (data->flavour[j] == FLAVOUR_STDOUT) ? STDOUT_FILENO : STDERR_FILENO;
 
-        if(pump_buffer(buffer, output_fd, data->entry[j].fd, child->config->name) < 1) {
+        if(pump_buffer(buffer, child->config->name) < 1) {
             close(data->entry[j].fd);
 
             if(data->flavour[j] == FLAVOUR_STDOUT) {
-                child->f_out = -1;
+                child->out_buffer.source_fd = -1;
             }
 
             if(data->flavour[j] == FLAVOUR_STDERR) {
-                child->f_err = -1;
+                child->err_buffer.source_fd = -1;
             }
         }
     } 
